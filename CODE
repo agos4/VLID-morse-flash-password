@@ -1,0 +1,217 @@
+#include <LowPower.h>
+#include <Stepper.h>
+
+#define SENSOR_PIN (A0)
+#define redLED 3
+#define greenLED 5
+#define blueLED 6
+
+int Steps = 1;
+int steps_left = 5;
+int sensorValue = 0;
+int TAKE_STEPS;
+
+//4-phase, 8-stepper >>> 
+//5.625 degrees in half (eight) step sequence
+//11.25 degrees in full (four) step sequence
+
+#define STEPS_PER_REV 32
+Stepper Motor(STEPS_PER_REV, 8, 10, 9, 11);
+
+//32 steps per rev in full step mode
+//1/64 gear reduction ratio
+//incremental steps per rotation = steps per rev * output shaft of gear reduction = 32*64 = 2048
+#define INC_STEPS_FOR_1_REV 2048
+
+void setColour(int redValue, int greenValue, int blueValue) {
+ analogWrite(redLED, redValue);
+ analogWrite(greenLED, greenValue);
+ analogWrite(blueLED, blueValue);
+ //255 = off
+ //0 = on
+ //scalar
+}
+
+static const String morseAlpha[26] = {
+	".-",	  // A
+	"-...", // B
+	"-.-.", // C
+	"-..",	// D
+	".",	  // E
+	"..-.", // F
+	"--.",	// G
+	"....", // H
+	"..",	  // I
+	".---", // J
+	"-.-",	// K
+	".-..", // L
+	"--",	  // M
+	"-.",	  // N
+	"---",	// O
+	".--.", // P
+	"--.-", // Q
+	".-.",	// R
+	"...",	// S
+	"-",	  // T
+	"..-",	// U
+	"...-", // V
+	".--",	// W
+	"-..-", // X
+	"-.--", // Y
+	"--.."	// Z
+};
+
+using Time = unsigned long; //Time as temp
+
+static const String passwordString = "FKEY"; //Password
+static String passwordInputString; //string to hold password attempt
+static String morseInputString; //string to hold the '.'s and '-'s
+
+// TIMING
+// dash length is 3 * dot length
+static const int dotLengthMS = 100; // unit length
+static const int dashLengthMS = dotLengthMS * 3; //dash duration is three times dot length
+static const int breakLengthMS = dotLengthMS * 3; //break length is same as dash length
+
+static char morseToChar(String string)
+{
+	for (int i = 0; i < 26; i++) 
+	{
+		if (morseAlpha[i] == string)
+			return (char)65 + i; //ASCII character 65 is A
+	}
+
+	return '\0';
+};
+
+
+static bool withinRange(Time t, Time duration, Time variance = 20) //leeway between pulses - lower if poss
+{
+	const Time V = variance;
+	return (t >= (duration - V)) && (t < (duration + V));
+}
+
+void setup()
+{
+Serial.begin(9600);
+
+pinMode(SENSOR_PIN, INPUT);
+pinMode(13, OUTPUT);
+
+pinMode(redLED, OUTPUT);
+pinMode(greenLED, OUTPUT);
+pinMode(blueLED, OUTPUT);
+}
+
+void loop()
+{
+  setColour(255, 255, 254); //LED off
+  
+	static bool previousSensorState{};
+	static Time pulseChangeTimestamp{}; //time upon pulse changing
+
+	Time pulseDuration;
+	                                                      //boolean variable true upon reading > 10
+  const bool sensorState = analogRead(SENSOR_PIN) > 10; //take reading only when photodiode input reading is >10
+  
+	digitalWrite(13, sensorState); //led on arduino, active when photodiode reading > 10
+
+	
+	if (sensorState != previousSensorState) //check for state change
+	{
+		const Time changeTime = millis(); //reset timer upon flash on or off
+
+		// if this is the first state change, just mark the start time
+		if (pulseChangeTimestamp == 0)
+		{
+			pulseChangeTimestamp = changeTime;
+			previousSensorState = sensorState;
+			return;
+		}
+
+		pulseDuration = millis() - pulseChangeTimestamp;
+		pulseChangeTimestamp = changeTime;
+
+		// if previousSensorState was high and current state is low
+		// pulseDuration represents an on period
+		// work out if it was a dash or a dot
+		if (previousSensorState == true)
+		{
+			if (morseInputString.length() > 4)
+				morseInputString = "";
+
+			if (withinRange(pulseDuration, dotLengthMS))
+			{
+				// dot
+				morseInputString = morseInputString + '.';
+				Serial.println(".");
+			}
+			else if (withinRange(pulseDuration, dashLengthMS))
+			{
+				// dash
+				morseInputString = morseInputString + '-';
+				Serial.println("-");
+			}
+		}
+
+		previousSensorState = sensorState; //reset on inactivity - toggle sensor state
+	}
+  
+	if (pulseChangeTimestamp)
+	{
+		if (sensorState == false && morseInputString.length())
+		{
+			// a prolonged off time indicates a break
+			if (millis() - pulseChangeTimestamp >= breakLengthMS)
+			{
+				if (passwordInputString.length() >= passwordString.length())
+					passwordInputString = "";
+
+				Serial.println(morseInputString);
+				if (char ch = morseToChar(morseInputString))
+				{
+					Serial.println(ch);
+
+            passwordInputString = passwordInputString + ch;                                          
+
+					if (passwordInputString == passwordString)
+					{
+						// GOT GOOD PASSWORD!!!
+
+						Serial.println("Password Accepted");
+            setColour(255, 200, 255); // Green LED flash for motor turn duration + one sec
+            TAKE_STEPS  =  - INC_STEPS_FOR_1_REV / 2;  //half counterclockwise turn (unlock)
+            Motor.setSpeed(900);
+            Motor.step(TAKE_STEPS);
+            delay(1000);
+            setColour(255, 255, 254); //LED off
+            delay(19000); //wait 20 secs,
+
+            TAKE_STEPS  =  INC_STEPS_FOR_1_REV / 2;  //clockwise half turn (relock)
+            Motor.setSpeed(500);
+            Motor.step(TAKE_STEPS);
+            delay(1000);
+
+						// reset password
+						passwordInputString = "";
+					}              
+				}
+
+				morseInputString = "";
+			}
+		}
+
+		// reset on inactivity
+		if (millis() - pulseChangeTimestamp > 3000)
+		{
+			morseInputString = ""; //reset morse readings
+			passwordInputString = "";
+
+			pulseChangeTimestamp = 0;
+      //Serial.println("Incorrect Password");
+			Serial.println("Reset!");
+      setColour(200, 255, 255); // Red LED flash for one sec
+      delay(1000);
+		}
+	}
+}
